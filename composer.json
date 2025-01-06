@@ -1,10 +1,20 @@
 {
+  "config": {
+      "platform": {
+          "php": "7.4.3"
+      }
+  },
   "require": {
-    "wikimedia/deadlinkchecker": ">=v1.1",
+    "wikimedia/deadlinkchecker": ">=v1.8",
     "neitanod/forceutf8": "dev-master",
     "wikimedia/utfnormal": "dev-master",
     "php-http/curl-client": "^2.2",
-    "sentry/sdk": "^3.1"
+    "sentry/sdk": "^3.1",
+    "influxdb/influxdb-php": "^1.15",
+    "influxdata/influxdb-client-php": "^3.3",
+    "guzzlehttp/guzzle": "^7.5",
+    "phpmailer/phpmailer": "^6.8.0",
+    "wikimedia/language-data": "^1.1"
   },
   "repositories": [
     {

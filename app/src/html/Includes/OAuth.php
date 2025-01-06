@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -23,7 +23,7 @@
  * OAuth object
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 
 /**
@@ -31,7 +31,7 @@
  * OAuth manager of the web interface and API handler.
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 class OAuth {
 
@@ -429,7 +429,7 @@ class OAuth {
 						return true;
 					} elseif( $OAuthIssue === true ) {
 						//We got kicked back because OAuth is blocked or doesn't exist.  Let's handle this gracefully.
-						@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+						@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 						@header( "Location: index.php?wiki=" . $_SESSION['previouswiki'], true, 307 );
 
 						return false;

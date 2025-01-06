@@ -1,7 +1,7 @@
 <?php
 
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -51,6 +51,7 @@ class HTMLLoader {
 			} else {
 				$this->i18n = file_get_contents( "i18n/en.json" );
 				$this->loadLangErrorBox( $langCode );
+				$langCode = 'en';
 			}
 			$this->defaulti18n = file_get_contents( "i18n/en.json" );
 		} else {
@@ -70,6 +71,12 @@ class HTMLLoader {
 		$this->defaulti18n = json_decode( $this->defaulti18n, true );
 
 		$this->assignElement( "languagecode", $langCode );
+
+		$languageUtil = Wikimedia\LanguageData\LanguageUtil::get();
+		$langDir = $languageUtil->getDir( $langCode );
+
+		$this->assignElement( "languagedir", $langDir );
+
 		if( defined( 'VERSION' ) ) $this->assignAfterElement( "botversion", VERSION );
 		if( defined( 'CHECKIFDEADVERSION' ) ) $this->assignAfterElement( "cidversion", CHECKIFDEADVERSION );
 		$this->assignAfterElement( "rooturl", ROOTURL );

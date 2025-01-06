@@ -1,7 +1,7 @@
 <?php
 
 /*
-	Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -24,7 +24,7 @@
  * API object
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 
 use Wikimedia\DeadlinkChecker\CheckIfDead;
@@ -37,7 +37,7 @@ use function Sentry\captureException;
  * It also manages the page data for every thread, and handles DB and parser calls.
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 class API {
 
@@ -50,6 +50,16 @@ class API {
 	 * @staticvar
 	 */
 	protected static $globalCurl_handle = null;
+
+	/**
+	 * Stares the states of the last Curl request
+	 *
+	 * @var array
+	 * @access protected
+	 * @static
+	 * @staticvar
+	 */
+	protected static $lastCurlStats = [];
 
 	/**
 	 * A flag that determines if the profiler is enabled.
@@ -146,6 +156,13 @@ class API {
 	 */
 	public $content = "";
 	/**
+	 * Stores the page content retrieval time for the page being analyzed
+	 *
+	 * @var int
+	 * @access public
+	 */
+	public $contentFetchTime = 0;
+	/**
 	 * Stores the revids of the page's history
 	 *
 	 * @var array
@@ -159,6 +176,13 @@ class API {
 	 * @var DB
 	 */
 	public $db;
+	/**
+	 * Stores the metrics driver to send analytics to a resource
+	 *
+	 * @access protected
+	 * @var MetricsDriver
+	 */
+	protected static $metricsHandler;
 
 	/**
 	 * Constructor function for the API class.
@@ -172,19 +196,142 @@ class API {
 	 * @access    public
 	 * @throws Exception
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
-	public function __construct( $page, $pageid, $config ) {
+	public function __construct( $page, $pageid, $config, $cachedContent = false ) {
 		$this->page = $page;
 		$this->pageid = $pageid;
 		$this->config = $config;
-		$this->content = self::getPageText( $page );
+		if( $cachedContent === false ) {
+			$this->content = self::getPageText( $page );
+			$this->contentFetchTime = time();
+		} else {
+			$this->content = $cachedContent['wikitext'];
+			$this->contentFetchTime = $cachedContent['time'];
+		}
 		if( $config['rate_limit'] != 0 ) self::$rateLimit = $config['rate_limit'];
 		else self::$rateLimit = false;
 
 		$tmp = DBCLASS;
 		$this->db = new $tmp( $this );
+	}
+
+	/**
+	 * Retrieve the wikitext of multiple pages
+	 *
+	 * @param array $objects Page IDs or Titles to fetch
+	 * @param string $objectType Fetch based on page ID, revision ID, or page title
+	 *
+	 * @access    public
+	 * @static
+	 * @return array Page content
+	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
+	 * @author    Maximilian Doerr (Cyberpower678)
+	 */
+	public static function getBatchText( $objects, $objectType = 'pagetitle', &$unhandledObjects = [],
+	                                     $handleLimitations = true
+	) {
+		$returnArray = [];
+
+		while( !empty( $objects ) ) {
+			$queryArray = [
+				'action'  => 'query',
+				'prop'    => 'revisions',
+				'rvprop'  => 'content',
+				'rvslots' => '*',
+			];
+
+			if( !isset( $batch )  ) $batch = $objects;
+
+			switch( $objectType ) {
+				case 'pagetitle':
+					$queryArray['titles'] = implode( '|', $batch );
+					break;
+				case 'pageid':
+					$queryArray['pageids'] = implode( '|', $batch );
+					break;
+				default:
+					return false;
+			}
+
+			$queryArray['format'] = 'json';
+
+			if( IAVERBOSE ) {
+				echo "Making query: " . http_build_query( $queryArray );
+			}
+
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'query',
+					'sact' => 'revisions',
+					'cm'   => "APII::getBatchText()"
+				],
+				'aggregation_fields' => [
+					'batch_size' => count( $batch )
+				]
+			];
+			$parseData =
+				json_decode( self::makeHTTPRequest( API, $queryArray, true, true, [], [], $metricsArray ), true );
+
+			if( !empty( $parseData['error']['code'] ) && $parseData['error']['code'] == "toomanyvalues" ) {
+				$limit = $parseData['error']['limit'];
+				$batch = array_slice( $objects, 0, $limit );
+				continue;
+			}
+
+			if( !empty( $parseData['query']['pages'] ) ) foreach( $parseData['query']['pages'] as $pageData ) {
+				switch( $objectType ) {
+					case 'pagetitle':
+						if( isset( $pageData['revisions'][0]['slots']['main']['*'] ) )
+							$returnArray[$pageData['title']] = $pageData['revisions'][0]['slots']['main']['*'];
+						elseif( strpos( $parseData['warnings']['result']['*'], "truncated" ) === false )
+							$returnArray[$pageData['title']] = false;
+
+						if( $returnArray[$pageData['title']] !== false ||
+						    empty( $parseData['warnings']['result']['*'] ) ||
+						    strpos( $parseData['warnings']['result']['*'], "truncated" ) !== false )
+							unset( $objects[array_search( $pageData['title'], $objects )] );
+						break;
+					case 'pageid':
+						if( isset( $pageData['revisions'][0]['slots']['main']['*'] ) )
+							$returnArray[$pageData['pageid']] = $pageData['revisions'][0]['slots']['main']['*'];
+						elseif( strpos( $parseData['warnings']['result']['*'], "truncated" ) === false )
+							$returnArray[$pageData['pageid']] = false;
+
+						if( !empty( $returnArray[$pageData['pageid']] ) ||
+						    empty( $parseData['warnings']['result']['*'] ) ||
+						    strpos( $parseData['warnings']['result']['*'], "truncated" ) === false )
+							unset( $objects[array_search( $pageData['pageid'], $objects )] );
+						break;
+				}
+			}
+
+			$diff = count( $batch ) - count( $objects );
+
+			if( isset( $limit ) ) $batch = array_slice( $objects, 0, $limit );
+			else $batch = $objects;
+
+			$unhandledObjects = $objects;
+
+			if( !$handleLimitations && $diff !== 0 ) break;
+		}
+
+		return $returnArray;
+	}
+
+	public static function loadMetricsHandler() {
+		if( !( self::$metricsHandler instanceof MetricsDriver ) ) {
+			if( defined( 'METRICSDRIVER' ) ) {
+				$tmp = METRICSDRIVER;
+			} else $tmp = "Dummy";
+			self::$metricsHandler = new $tmp( unserialize( METRICSCONFIG ) );
+
+			self::$metricsHandler->initialize();
+		}
 	}
 
 	/**
@@ -197,7 +344,7 @@ class API {
 	 * @static
 	 * @return string Page content
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getPageText( $object, $objectType = 'pagetitle', &$sectionID = false, $returnHTML = false,
@@ -232,7 +379,24 @@ class API {
 				$parseArray['action'] = 'parse';
 				$parseArray['prop'] = 'sections';
 
-				$sectionData = self::makeHTTPRequest( API, $parseArray );
+				if( IAVERBOSE ) {
+					echo "Making query: " . http_build_query( $parseArray );
+				}
+
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'parse',
+						'sact' => 'sections',
+						'cm'   => "APII::getPageText()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+
+				$sectionData = self::makeHTTPRequest( API, $parseArray, false, true, [], [], $metricsArray );
 
 				foreach( $sectionData['parse']['sections'] as $section ) {
 					if( $section['line'] == $sectionID ) $sectionID = $queryArray['section'] = $section['index'];
@@ -241,9 +405,43 @@ class API {
 
 			$queryArray['format'] = 'json';
 			if( !$forceURL ) {
-				$parseData = json_decode( self::makeHTTPRequest( API, $queryArray ), true );
+				if( IAVERBOSE ) {
+					echo "Making query: " . http_build_query( $queryArray );
+				}
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'parse',
+						'sact' => $queryArray['prop'],
+						'cm'   => "APII::getPageText()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$parseData =
+					json_decode( self::makeHTTPRequest( API, $queryArray, false, true, [], [], $metricsArray ), true );
 			} else {
-				$parseData = json_decode( self::makeHTTPRequest( $forceURL, $queryArray ), true );
+				if( IAVERBOSE ) {
+					echo "Making query: $forceURL?" . http_build_query( $queryArray );
+				}
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'custom_endpoint',
+						'ract' => 'parse',
+						'sact' => $queryArray['prop'],
+						'cm'   => "APII::getPageText()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$parseData =
+					json_decode( self::makeHTTPRequest( $forceURL, $queryArray, false, true, [], [], $metricsArray ),
+					             true
+					);
 
 				if( $parseData === null ) $parseData = false;
 			}
@@ -276,9 +474,43 @@ class API {
 			$queryArray['format'] = 'json';
 
 			if( !$forceURL ) {
-				$parseData = json_decode( self::makeHTTPRequest( API, $queryArray ), true );
+				if( IAVERBOSE ) {
+					echo "Making query: " . http_build_query( $queryArray );
+				}
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => 'revisions',
+						'cm'   => "APII::getPageText()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$parseData =
+					json_decode( self::makeHTTPRequest( API, $queryArray, false, true, [], [], $metricsArray ), true );
 			} else {
-				$parseData = json_decode( self::makeHTTPRequest( $forceURL, $queryArray ), true );
+				if( IAVERBOSE ) {
+					echo "Making query: $forceURL?" . http_build_query( $queryArray );
+				}
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'custom_endpoint',
+						'ract' => 'query',
+						'sact' => 'revisions',
+						'cm'   => "APII::getPageText()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$parseData =
+					json_decode( self::makeHTTPRequest( $forceURL, $queryArray, false, true, [], [], $metricsArray ),
+					             true
+					);
 
 				if( $parseData === null ) $parseData = false;
 			}
@@ -295,7 +527,7 @@ class API {
 	 * @access    private
 	 * @static
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 *
 	 * @param       $url      Endpoint to query
@@ -308,9 +540,18 @@ class API {
 	 * @throws Exception
 	 */
 	private static function makeHTTPRequest( $url, $query = [], $usePOST = false, $useOAuth = true, $keys = [],
-	                                         $headers = []
+	                                         $headers = [], $metricsArray = false, $maxAttempts = 0
 	) {
 		global $accessibleWikis;
+
+		if( empty( $metricsArray['aggregation_fields']['ra'] ) )
+			$metricsArray['aggregation_fields']['ra'] = 1;
+		else $metricsArray['aggregation_fields']['ra']++;
+
+		if( $usePOST ) $metricsArray['group_fields']['rm'] = 'POST';
+		else $metricsArray['group_fields']['rm'] = 'GET';
+
+		$tmpMetrics = $metricsArray;
 
 		if( is_null( self::$globalCurl_handle ) ) self::initGlobalCurlHandle();
 
@@ -361,21 +602,42 @@ class API {
 		global $curlLastHeaders;
 		$curlLastHeaders = [];
 
+		$startTime = microtime( true );
+
 		$data = curl_exec( self::$globalCurl_handle );
 
 		$curlData = curl_getinfo( self::$globalCurl_handle );
 
+		$tmpMetrics['aggregation_fields']['rt'] = microtime( true ) - $startTime;
+		$tmpMetrics['group_fields']['rc'] = $curlData['http_code'];
+		$tmpMetrics['aggregation_fields']['reqs'] = $curlData['request_size'];
+		$tmpMetrics['aggregation_fields']['ress'] = $curlData['size_download'];
+		$tmpMetrics['group_fields']['host'] = gethostname();
+		$tmpMetrics['group_fields']['wiki'] = WIKIPEDIA;
+		$tmpMetrics['group_fields']['wid'] = UNIQUEID;
+
+		if( !( self::$metricsHandler instanceof MetricsDriver ) ) self::loadMetricsHandler();
+		self::$metricsHandler->createEntry( microtime( true ), $tmpMetrics );
+
 		if( $curlData['http_code'] == 429 ) {
+			if( $maxAttempts > 0 && (int) $metricsArray['aggregation_fields']['ra'] >= $maxAttempts ) return null;
+
 			if( !empty( $curlLastHeaders['retry-after'] ) ) {
 				sleep( $curlLastHeaders['retry-after'][0] );
 			}
 
-			return self::makeHTTPRequest( $url, $query, $usePOST, $useOAuth, $keys, $headers );
+			return self::makeHTTPRequest( $url, $query, $usePOST, $useOAuth, $keys, $headers, $metricsArray,
+			                              $maxAttempts
+			);
 		}
 		if( $curlData['http_code'] >= 500 || in_array( $curlData['http_code'], [ 400, 408, 409 ] ) ) {
+			if( $maxAttempts > 0 && (int) $metricsArray['aggregation_fields']['ra'] >= $maxAttempts ) return null;
+
 			sleep( 1 );
 
-			return self::makeHTTPRequest( $url, $query, $usePOST, $useOAuth, $keys, $headers );
+			return self::makeHTTPRequest( $url, $query, $usePOST, $useOAuth, $keys, $headers, $metricsArray,
+			                              $maxAttempts
+			);
 		}
 
 		if( !empty( $curlData['redirect_url'] ) ) {
@@ -413,6 +675,7 @@ class API {
 		return $data;
 	}
 
+
 	/**
 	 * Create and setup a global curl handle
 	 *
@@ -420,7 +683,7 @@ class API {
 	 * @static
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected static function initGlobalCurlHandle() {
@@ -431,7 +694,7 @@ class API {
 		curl_setopt( self::$globalCurl_handle, CURLOPT_MAXREDIRS, 20 );
 		curl_setopt( self::$globalCurl_handle, CURLOPT_ENCODING, 'gzip' );
 		curl_setopt( self::$globalCurl_handle, CURLOPT_RETURNTRANSFER, 1 );
-		curl_setopt( self::$globalCurl_handle, CURLOPT_TIMEOUT, 100 );
+		curl_setopt( self::$globalCurl_handle, CURLOPT_TIMEOUT, 300 );
 		curl_setopt( self::$globalCurl_handle, CURLOPT_CONNECTTIMEOUT, 10 );
 		curl_setopt( self::$globalCurl_handle, CURLOPT_FOLLOWLOCATION, 0 );
 		curl_setopt( self::$globalCurl_handle, CURLOPT_SSL_VERIFYPEER, false );
@@ -471,10 +734,10 @@ class API {
 	 * @static
 	 * @return string Header field
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
-	public static function generateOAuthHeader( $method = 'GET', $url, $keys = [] ) {
+	public static function generateOAuthHeader( $method, $url, $keys = [] ) {
 		if( !empty( $keys['consumerkey'] ) && !empty( $keys['consumersecret'] ) && !empty( $keys['accesstoken'] ) &&
 		    !empty( $keys['accesssecret'] ) ) {
 			$headerArr = [
@@ -527,7 +790,7 @@ class API {
 	 * @static
 	 * @return base64 encoded signature
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected static function generateSignature( $method, $url, $params = [], $consumerSecret = false,
@@ -584,7 +847,7 @@ class API {
 	 *
 	 * @return array Whether or not each page exists
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function pagesExist( $pageList ) {
@@ -603,7 +866,19 @@ class API {
 
 				$out = http_build_query( $params );
 				if( IAVERBOSE ) echo "Making query: $out\n";
-				$data = self::makeHTTPRequest( API, $params, true );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => '',
+						'cm'   => "APII::pagesExist()"
+					],
+					'aggregation_fields' => [
+						'batch_size' => count( $subList )
+					]
+				];
+				$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 
 				if( isset( $data['error']['code'] ) && $data['error']['code'] == 'toomanyvalues' ) {
@@ -640,7 +915,7 @@ class API {
 	 * @static
 	 * @return int The number of titles that can be passed without errors
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getTitlesLimit() {
@@ -652,7 +927,19 @@ class API {
 			];
 			$get = http_build_query( $params );
 			if( IAVERBOSE ) echo "Making query: $get\n";
-			$data = self::makeHTTPRequest( API, $params );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'paraminfo',
+					'sact' => '',
+					'cm'   => "APII::getTitlesLimit()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
 			self::$titlesLimit = $data['paraminfo']['modules'][0]['parameters'];
 			foreach( self::$titlesLimit as $params ) {
@@ -675,7 +962,7 @@ class API {
 	 * @static
 	 * @return array User information
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getUser( $userID ) {
@@ -690,7 +977,19 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'query',
+				'sact' => 'users',
+				'cm'   => "APII::getUser()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 
 		self::$userAPICache[$userID] = $data['query']['users'][0];
@@ -706,7 +1005,7 @@ class API {
 	 * @return bool Successful login
 	 *
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function botLogon() {
@@ -717,7 +1016,19 @@ class API {
 
 		if( IAVERBOSE ) echo "Making query: $url\n";
 
-		$data = self::makeHTTPRequest( $url, [], true );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'oauth',
+				'sact' => 'identify',
+				'cm'   => "APII::botLogon()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( $url, [], true, true, [], [], $metricsArray );
 		if( !$data ) {
 			$error = 'Curl error: ' . htmlspecialchars( curl_error( self::$globalCurl_handle ) );
 			goto loginerror;
@@ -786,7 +1097,7 @@ class API {
 	 * @static
 	 * @return array Loaded configuration from on wiki.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function fetchConfiguration( &$isDefined = false, $getCiteDefinitions = true, $force = false ) {
@@ -926,12 +1237,26 @@ class API {
 			$get = http_build_query( $params );
 
 			if( IAVERBOSE ) echo "Making query: $get\n";
-			$data = self::makeHTTPRequest( API, $params );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'sitematrix',
+					'sact' => 'language',
+					'cm'   => "APII::getSiteMatrix()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
 
 			if( isset( $data['error'] ) && $data['error']['code'] == 'badvalue' ) {
 				return false;
 			}
+
+			if( empty( $data['sitematrix'] ) ) return false;
 
 			$siteMatrix = $data['sitematrix'];
 			foreach( $siteMatrix as $tid => $data ) {
@@ -957,7 +1282,7 @@ class API {
 	 * @static
 	 * @return string Final page destination or false on failure
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getRedirectRoot( $pageTitle ) {
@@ -973,7 +1298,19 @@ class API {
 		$get = http_build_query( $params );
 
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'query',
+				'sact' => '',
+				'cm'   => "APII::getRedirectRoot()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 
 		$endTarget = $pageTitle;
@@ -990,6 +1327,7 @@ class API {
 			}
 		}
 
+		if( !self::$redirects ) self::$redirects = [];
 		self::$redirects[$pageTitle] = $endTarget;
 
 		return $endTarget;
@@ -1002,7 +1340,7 @@ class API {
 	 * @static
 	 * @return array Fetched citoid and respective template data from the wiki.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function retrieveCitoidDefinitions() {
@@ -1012,9 +1350,9 @@ class API {
 		if( !empty( $citoidMapTypes ) && ( $citoidMapTypes = json_decode( $citoidMapTypes, true ) ) ) {
 			$returnArray['mapped_templates'] = $citoidMapTypes;
 			$returnArray['unique_templates'] = array_unique( $citoidMapTypes, SORT_REGULAR );
+			$templateData = self::getTemplateData( $returnArray['unique_templates'] );
 			foreach( $returnArray['unique_templates'] as $cite ) {
-				$templateData = self::getTemplateData( $cite );
-				if( !empty( $templateData ) ) $returnArray['template_data'][$cite] = $templateData;
+				if( !empty( $templateData[$cite] ) ) $returnArray['template_data'][$cite] = $templateData[$cite];
 			}
 		}
 
@@ -1028,42 +1366,102 @@ class API {
 	 * @static
 	 * @return array Fetched template data from the wiki.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
-	public static function getTemplateData( $template, $force = false ) {
-		$template = trim( $template, "{}" );
+	public static function getTemplateData( $templates, $force = false ) {
+		$returnArray = [];
+		$toLookup = [];
+		foreach( $templates as $tid => $template ) {
+			$ttemplates[$tid] = trim( $template, "{}" );
+			if( !isset( self::$cachedTemplateData[self::getTemplateNamespaceName() . ":{$ttemplates[$tid]}"] ) ||
+			    $force ||
+			    time() - self::$cachedTemplateData[self::getTemplateNamespaceName() . ":{$ttemplates[$tid]}"][1] >
+			    3600 )
+				if( !in_array( self::getTemplateNamespaceName() . ":{$ttemplates[$tid]}", $toLookup ) ) $toLookup[] =
+					self::getTemplateNamespaceName() . ":{$ttemplates[$tid]}";
+		}
 
-		if( !isset( self::$cachedTemplateData[$template] ) || $force ||
-		    time() - self::$cachedTemplateData[$template][1] > 3600 ) {
-			$pageNameTemplate = self::getTemplateNamespaceName() . ":$template";
-
+		while( !empty( $toLookup ) ) {
 			$params = [
 				'action'               => "templatedata",
 				'format'               => "json",
-				'titles'               => $pageNameTemplate,
 				'includeMissingTitles' => "1",
 				'lang'                 => "en",
 				'redirects'            => "1"
 			];
 
+			if( isset( $limit ) ) $params['titles'] = implode( '|', $batch );
+			else $params['titles'] = implode( '|', $toLookup );
+
 			$get = http_build_query( $params );
 			if( IAVERBOSE ) echo "Making query: $get\n";
 
-			$data = self::makeHTTPRequest( API, $params );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'templatedata',
+					'sact' => '',
+					'cm'   => "APII::getTemplateData()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
+
+			if( !empty( $data['error']['code'] ) && $data['error']['code'] == "toomanyvalues" ) {
+				$limit = $data['error']['limit'];
+				$batch = array_slice( $toLookup, 0, $limit );
+				continue;
+			}
+			if( !empty( $data['error']['code'] ) && $data['error']['code'] == "templatedata-corrupt" ) {
+				if( $limit == 1 ) {
+					self::$cachedTemplateData[$batch[0]] = [ false, time() ];
+					unset( $toLookup[array_search( $batch[0], $toLookup )] );
+					$batch = array_slice( $toLookup, 0, $limit );
+					continue;
+				}
+				$limit = 1;
+				$batch = array_slice( $toLookup, 0, $limit );
+				continue;
+			}
 
 			if( !empty( $data['pages'] ) ) {
 				foreach( $data['pages'] as $pageData ) {
-					if( isset( $pageData['missing'] ) ) self::$cachedTemplateData[$template][0] = false;
-					else self::$cachedTemplateData[$template][0] = $pageData;
+					if( isset( $pageData['missing'] ) ) self::$cachedTemplateData[$pageData['title']][0] = false;
+					else self::$cachedTemplateData[$pageData['title']][0] = $pageData;
+					self::$cachedTemplateData[$pageData['title']][1] = time();
+					unset( $toLookup[array_search( $pageData['title'], $toLookup )] );
 				}
-			} else self::$cachedTemplateData[$template][0] = false;
+			} else {
+				foreach( $batch as $tid => $template ) {
+					self::$cachedTemplateData[$template][0] = false;
+					self::$cachedTemplateData[$template][1] = time();
+				}
+			}
 
-			self::$cachedTemplateData[$template][1] = time();
+			if( !isset( $data['normalized'] ) ) $data['normalized'] = [];
+			if( !isset( $data['redirects'] ) ) $data['redirects'] = [];
+
+			foreach( array_merge( $data['normalized'], $data['redirects'] ) as $normed ) {
+				self::$cachedTemplateData[$normed['from']] = [ false, time() ];
+				unset( $toLookup[array_search( $normed['from'], $toLookup )] );
+			}
+
+			if( isset( $limit ) ) $batch = array_slice( $toLookup, 0, $limit );
+
+			if( empty( $data['pages'] ) ) break;
 		}
 
-		return self::$cachedTemplateData[$template][0];
+		foreach( $templates as $tid => $template ) {
+			$returnArray[$template] =
+				self::$cachedTemplateData[self::getTemplateNamespaceName() . ":{$ttemplates[$tid]}"][0];
+		}
+
+		return $returnArray;
 	}
 
 	/**
@@ -1073,7 +1471,7 @@ class API {
 	 * @static
 	 * @return string The name of the Template namespace
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getTemplateNamespaceName() {
@@ -1087,7 +1485,7 @@ class API {
 	 * @static
 	 * @return string The name of the Template namespace
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getNamespaceName( $namespace ) {
@@ -1102,8 +1500,19 @@ class API {
 			if( IAVERBOSE ) echo "Making query: $get\n";
 			$tried = 0;
 			do {
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => 'siteinfo',
+						'cm'   => "APII::getNamespaceName()"
+					],
+					'aggregation_fields' => [
 
-				$data = self::makeHTTPRequest( API, $params );
+					]
+				];
+				$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 
 				$tried++;
@@ -1126,7 +1535,7 @@ class API {
 	 * @static
 	 * @return string The name of the Module namespace
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getModuleNamespaceName() {
@@ -1144,7 +1553,7 @@ class API {
 	 * @static
 	 * @return array A list of pages with respective page IDs.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getAllArticles( $limit, array $resume, $namespace = 0 ) {
@@ -1163,7 +1572,19 @@ class API {
 			$get = http_build_query( $params );
 			if( IAVERBOSE ) echo "Making query: $get\n";
 
-			$data = self::makeHTTPRequest( API, $params );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'query',
+					'sact' => 'allpages',
+					'cm'   => "APII::getAllArticles()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
 			$returnArray = array_merge( $returnArray, $data['query']['allpages'] );
 			if( isset( $data['continue'] ) ) {
@@ -1197,7 +1618,7 @@ class API {
 	 * @return mixed Revid if successful, else false
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	public static function edit( $page, $text, $summary, $minor = false, $timestamp = false, $bot = true,
 	                             $section = false, $title = "", &$error = null, $keys = []
@@ -1288,12 +1709,35 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'query',
+				'sact' => 'tokens',
+				'cm'   => "APII::edit()"
+			],
+			'aggregation_fields' => [
 
-		$data = self::makeHTTPRequest( API, $params, false, true, $keys );
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, false, true, $keys, [], $metricsArray );
 		$data = json_decode( $data, true );
 		$post['token'] = $data['query']['tokens']['csrftoken'];
 		repeatEditRequest:
-		$data2 = self::makeHTTPRequest( API, $post, true, true, $keys );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'edit',
+				'sact' => '',
+				'cm'   => "APII::edit()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data2 = self::makeHTTPRequest( API, $post, true, true, $keys, [], $metricsArray );
 		if( IAVERBOSE ) echo "Posting to: " . API . "\n";
 		$data = json_decode( $data2, true );
 		if( isset( $data['edit'] ) && $data['edit']['result'] == "Success" && !isset( $data['edit']['nochange'] ) ) {
@@ -1365,7 +1809,7 @@ class API {
 	 * @static
 	 * @return bool Whether bot is enabled on the runpage.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function isEnabled() {
@@ -1387,7 +1831,7 @@ class API {
 	 * @static
 	 * @return bool Whether it should follow nobots exception.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected static function nobots( $text ) {
@@ -1432,7 +1876,7 @@ class API {
 	 * @static
 	 * @return array A list of pages with respective page IDs.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getTaggedArticles( &$titles, $limit, array $resume ) {
@@ -1451,7 +1895,19 @@ class API {
 				$get = http_build_query( $params );
 				if( IAVERBOSE ) echo "Making query: $get\n";
 
-				$data = self::makeHTTPRequest( API, $params );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => 'transcludedin',
+						'cm'   => "APII::getTaggedArticles()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 				if( !empty( $data['query']['pages'] ) ) {
 					foreach( $data['query']['pages'] as $template ) {
@@ -1485,7 +1941,7 @@ class API {
 	 * @static
 	 * @return array A list of pages with respective page IDs. False if one of the pages isn't a category.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getArticlesFromCategory( array $titles, array $resume = [], $recurse = false ) {
@@ -1494,6 +1950,7 @@ class API {
 		if( self::$categories === false || $recurse === true ) {
 			if( $recurse === false ) self::$categories = [];
 			foreach( $titles as $title ) {
+				if( !empty( self::$categories ) && in_array( $title, self::$categories ) ) continue;
 				self::$categories[] = $title;
 
 				while( true ) {
@@ -1508,6 +1965,18 @@ class API {
 					$params = array_merge( $params, $resume );
 					$get = http_build_query( $params );
 					if( IAVERBOSE ) echo "Making query: $get\n";
+					$metricsArray = [
+						'name'               => WIKIFARM,
+						'group_fields'       => [
+							'ep'   => 'mediawiki_api',
+							'ract' => 'query',
+							'sact' => 'categorymembers',
+							'cm'   => "APII::getArticlesFromCategory()"
+						],
+						'aggregation_fields' => [
+
+						]
+					];
 					$data = self::makeHTTPRequest( API, $params );
 					$data = json_decode( $data, true );
 					if( !isset( $data['query']['categorymembers'] ) ) return false;
@@ -1538,7 +2007,7 @@ class API {
 				$params = array_merge( $params, $resume );
 				$get = http_build_query( $params );
 				if( IAVERBOSE ) echo "Making query: $get\n";
-				$data = self::makeHTTPRequest( API, $params );
+				$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 				if( isset( $data['query']['categorymembers'] ) ) {
 					$returnArray =
@@ -1565,7 +2034,7 @@ class API {
 	 * @static
 	 * @return bool Also returns false on failure
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function isLoggedOn() {
@@ -1576,7 +2045,19 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'query',
+				'sact' => 'userinfo',
+				'cm'   => "APII::isLoggedOn()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 		if( $data['query']['userinfo']['name'] == USERNAME ) {
 			return true;
@@ -1592,7 +2073,7 @@ class API {
 	 * @static
 	 * @return mixed URL if successful, false on failure.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveExternalLink( $template ) {
@@ -1615,7 +2096,19 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params, true );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'parse',
+				'sact' => '',
+				'cm'   => "APII::resolveExternalLink()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 		if( isset( $data['parse']['externallinks'] ) && !empty( $data['parse']['externallinks'] ) ) {
 			if( count( $data['parse']['externallinks'] ) > 1 ) {
@@ -1642,7 +2135,7 @@ class API {
 	 * @static
 	 * @return mixed Parser output
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function wikitextToHTML( $wikitext ) {
@@ -1658,7 +2151,19 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params, true );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'parse',
+				'sact' => 'text',
+				'cm'   => "APII::wikitextToHTML()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 		if( isset( $data['parse']['text'] ) && !empty( $data['parse']['text'] ) ) {
 			return $data['parse']['text']['*'];
@@ -1676,7 +2181,7 @@ class API {
 	 * @static
 	 * @return mixed URL if successful, false on failure.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWikitext( $text ) {
@@ -1689,7 +2194,19 @@ class API {
 		];
 		$get = http_build_query( $params );
 		if( IAVERBOSE ) echo "Making query: $get\n";
-		$data = self::makeHTTPRequest( API, $params, true );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'parse',
+				'sact' => 'text',
+				'cm'   => "APII::resolveWikitext()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 		if( isset( $data['parse']['text']['*'] ) && !empty( $data['parse']['text']['*'] ) ) {
 			$text = $data['parse']['text']['*'];
@@ -1716,7 +2233,7 @@ class API {
 	 * @static
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function escapeTags( &$config ) {
@@ -1818,7 +2335,7 @@ class API {
 	 * @access    public
 	 * @return array A list of templates that redirect to the given titles
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getRedirects( &$titles ) {
@@ -1841,7 +2358,19 @@ class API {
 				$params = array_merge( $params, $resume );
 				$get = http_build_query( $params );
 				if( IAVERBOSE ) echo "Making query: $get\n";
-				$data = self::makeHTTPRequest( API, $params, true );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => 'redirects',
+						'cm'   => "APII::getRedirects()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 				if( isset( $data['query']['pages'] ) ) {
 					foreach( $data['query']['pages'] as $template ) {
@@ -1873,7 +2402,7 @@ class API {
 	 *
 	 * @return bool Whether it exists or no
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function WikiwixExists( $url ) {
@@ -1884,7 +2413,19 @@ class API {
 		}
 
 		if( IAVERBOSE ) echo "Making query: $queryURL\n";
-		$data = self::makeHTTPRequest( $queryURL, [], false, false );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'wikiwix',
+				'ract' => 'cache',
+				'sact' => '',
+				'cm'   => "APII::WikiwixExists()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( $queryURL, [], false, false, [], [], $metricsArray, 10 );
 		if( $data == "cant connect db" ) return false;
 		$data = json_decode( $data, true );
 
@@ -1902,7 +2443,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveCatalonianArchiveURL( $url ) {
@@ -1932,18 +2473,30 @@ class API {
 	 * @static
 	 * @return array Server results.  False on failure.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function runCIDServer( $server, $toValidate = [] ) {
+		if( IAVERBOSE ) echo "Posting to $server\n";
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'external_cid',
+				'ract' => 'test_links',
+				'sact' => '',
+				'cm'   => "APII::runCIDServer()"
+			],
+			'aggregation_fields' => [
+				'batch_size' => count( $toValidate )
+			]
+		];
 		$toValidate = implode( "\n", $toValidate );
 
 		$params = [
 			'urls'     => $toValidate,
 			'authcode' => CIDAUTHCODE
 		];
-		if( IAVERBOSE ) echo "Posting to $server\n";
-		$data = self::makeHTTPRequest( $server, $params, true, false );
+		$data = self::makeHTTPRequest( $server, $params, true, false, [], [], $metricsArray );
 		$returnArray = json_decode( $data, true );
 
 		return $returnArray;
@@ -1956,7 +2509,7 @@ class API {
 	 * @static
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	public static function enableProfiling() {
 		if( PROFILINGENABLED === true && self::$profiling_enabled === false ) {
@@ -1986,7 +2539,7 @@ class API {
 	 * @static
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	public static function disableProfiling( $pageid, $title ) {
 		if( self::$profiling_enabled === true ) {
@@ -2042,7 +2595,7 @@ class API {
 	 * @access    public
 	 * @return array API response
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getBotRevisions() {
@@ -2065,7 +2618,7 @@ class API {
 	 * @static
 	 * @return array Revision history
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getPageHistory( $page ) {
@@ -2084,7 +2637,19 @@ class API {
 			$params = array_merge( $params, $resume );
 			$get = http_build_query( $params );
 			if( IAVERBOSE ) echo "Making query: $get\n";
-			$data = self::makeHTTPRequest( API, $params, true );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'query',
+					'sact' => 'revisions',
+					'cm'   => "APII::getPageHistory()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, true, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
 			if( isset( $data['query']['pages'] ) ) {
 				foreach( $data['query']['pages'] as $template ) {
@@ -2115,7 +2680,7 @@ class API {
 	 * @access    public
 	 * @return array User information or false if the reversion wasn't actually a revert
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getRevTextHistory( $lastID ) {
@@ -2163,7 +2728,7 @@ class API {
 	 * @static
 	 * @return array API response
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function getRevisionText( $revisions ) {
@@ -2180,7 +2745,19 @@ class API {
 		if( IAVERBOSE ) echo "Making query: $get\n";
 
 		//Fetch revisions of needle location in page history.  Scan for the presence of URL.
-		$data = self::makeHTTPRequest( API, $params );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'mediawiki_api',
+				'ract' => 'query',
+				'sact' => 'revisions',
+				'cm'   => "APII::getRevisionText()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 		$data = json_decode( $data, true );
 
 		return $data;
@@ -2195,7 +2772,7 @@ class API {
 	 * @access    public
 	 * @return array User information or false if the reversion wasn't actually a revert or the reverter is an IP
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getRevertingUser( $newlink, $oldLinks, $lastID ) {
@@ -2289,7 +2866,7 @@ class API {
 	 * @static
 	 * @return bool Whether the change was reversed
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function isReverted( $oldLink, $link, $intermediateRevisionLink = false ) {
@@ -2354,7 +2931,7 @@ class API {
 	 *
 	 * @return array results of the archive process including errors
 	 *
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -2443,7 +3020,7 @@ class API {
 	 *
 	 * @return array Result data and errors encountered during the process.  Index keys are preserved.
 	 *
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -2463,14 +3040,26 @@ class API {
 		$requestHeaders[] = "Accept: application/json";
 		$post['capture_outlinks'] = 1;
 
-		$apiURL = "https://web-beta.archive.org/save";
+		$apiURL = "https://web.archive.org/save";
 
 		foreach( $urls as $tid => $url ) {
 			$post['url'] = $url;
 			for( $i = 0; $i <= 21; $i++ ) {
 				if( IAVERBOSE ) echo "Posting to $apiURL\n";
 
-				$data = self::makeHTTPRequest( $apiURL, $post, true, false, [], $requestHeaders );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'archive_spn',
+						'ract' => 'save',
+						'sact' => '',
+						'cm'   => "APII::SavePageNow()"
+					],
+					'aggregation_fields' => [
+						'batch_size' => count( $urls )
+					]
+				];
+				$data = self::makeHTTPRequest( $apiURL, $post, true, false, [], $requestHeaders, $metricsArray );
 				$data = json_decode( $data, true );
 
 				if( isset( $data['status'] ) ) {
@@ -2561,7 +3150,7 @@ class API {
 	 * @static
 	 * @return bool True on successful
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function sendMail( $to, $from, $subject, $email ) {
@@ -2570,13 +3159,30 @@ class API {
 		$headers = [];
 		$headers[] = "MIME-Version: 1.0";
 		$headers[] = "Content-type: text/plain; charset=iso-8859-1";
-		$headers[] = "From: $from";
 		$headers[] = "Reply-To: <>";
 		$headers[] = "X-Mailer: PHP/" . phpversion();
 		$headers[] = "Useragent: " . USERAGENT;
 		$headers[] = "X-Accept-Language: en-us, en";
 
-		$success = mail( $to, $subject, $email, implode( "\r\n", $headers ) );
+		$tmp = EMAILDRIVER;
+		$mailer = new $tmp( unserialize( EMAILCONFIG ) );
+		$mailer->initialize();
+
+		$to = array_map( 'trim', explode( ',', $to ) );
+
+		$from = array_map( 'trim', explode( ' <', $from ) );
+		if( count( $from ) == 1 ) $from = [
+			'IABot Mailer',
+			$from[0]
+		]; else [
+			$from[0],
+			trim( $from[1], '<> ' )
+		];
+
+		$success =
+			$mailer->setSender( $from[0], $from[1] )->setRecipient( [ $to ] )->setSubject( $subject )->setBody( $email )
+			       ->setHeaders( $headers )->send();
+
 		if( $success ) {
 			echo "Success!!\n";
 		} else echo "Failed!!\n";
@@ -2593,7 +3199,7 @@ class API {
 	 *
 	 * @return array containing result data and errors.  Index keys are preserved.
 	 *
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -2678,7 +3284,7 @@ class API {
 	 * @static
 	 * @return array Result data and errors encountered during the process.  Index keys are preserved.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function CDXQuery( $post = [], $isMaster = true, $centralized = false ) {
@@ -2713,7 +3319,7 @@ class API {
 		} else {
 			if( !$centralized ) {
 				$limit = 50;
-			} else $limit = 1;
+			} else $limit = 3;
 			$i = 0;
 
 			$bom = pack( 'H*', 'EFBBBF' );
@@ -2724,7 +3330,20 @@ class API {
 				$tpost = str_replace( $bom, '', $tpost );
 				curl_setopt( self::$globalCurl_handle, CURLOPT_HEADER, 1 );
 				if( IAVERBOSE ) echo "Posting to $url\n";
-				$data = self::makeHTTPRequest( $url, $tpost, true, false, [], [ "Wayback-Api-Version: 2" ] );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'archive_availabilityapi',
+						'ract' => 'request_archive',
+						'sact' => '',
+						'cm'   => "APII::CDXQuery()"
+					],
+					'aggregation_fields' => [
+						'urls_requested' => count( $post )
+					]
+				];
+				$data =
+					self::makeHTTPRequest( $url, $tpost, true, false, [], [ "Wayback-Api-Version: 2" ], $metricsArray, $limit );
 				curl_setopt( self::$globalCurl_handle, CURLOPT_HEADER, 0 );
 				$header_size = curl_getinfo( self::$globalCurl_handle, CURLINFO_HEADER_SIZE );
 				$returnArray['headers'] = self::http_parse_headers( substr( $data, 0, $header_size ) );
@@ -2793,7 +3412,7 @@ class API {
 	 * @access    protected
 	 * @return array Associative array of the header
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected static function http_parse_headers( $header ) {
@@ -2815,7 +3434,7 @@ class API {
 	 *
 	 * @return array Result data and errors encountered during the process. Index keys are preserved.
 	 *
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -2964,7 +3583,7 @@ class API {
 	 * @static
 	 * @return bool True if it is an archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function isArchive( $url, &$data, $force = false ) {
@@ -3117,7 +3736,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveEuropaURL( $url ) {
@@ -3149,7 +3768,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveUKWebArchiveURL( $url ) {
@@ -3176,7 +3795,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 
@@ -3199,7 +3818,7 @@ class API {
 			if( isset( $aliasURLs ) ) foreach( $aliasURLs as $tURL ) {
 				$returnArray['aliases'][] = $checkIfDead->sanitizeURL( $tURL, true );
 			}
-			$returnArray['archive_url'] = "https://archive.ph/" . $match[2] . "/" . $match[3];
+			$returnArray['archive_url'] = "https://archive.today/" . $match[2] . "/" . $match[3];
 			$returnArray['archive_host'] = "archiveis";
 			if( isset( $fastResolve ) ) $returnArray['fast_resolve'] = $fastResolve;
 			else $returnArray['fast_resolve'] = false;
@@ -3215,7 +3834,19 @@ class API {
 			goto archiveisrestart;
 		}
 		if( IAVERBOSE ) echo "Making query: $url\n";
-		$data = self::makeHTTPRequest( $url, [], false, false );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'archive.today',
+				'ract' => 'resolve_archive',
+				'sact' => '',
+				'cm'   => "APII::resolveArchiveIsUrl()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( $url, [], false, false, [], [], $metricsArray, 10 );
 		if( preg_match( '/\<input id\=\"SHARE_LONGLINK\".*?value\=\"(.*?)\"\/\>/i', $data, $match ) ) {
 			$originalURL = $url;
 			if( preg_match( '/>Redirected from<\/td>.*?readonly value="(.*?)"/im', $data, $aMatch ) ) {
@@ -3248,7 +3879,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveMementoURL( $url ) {
@@ -3275,7 +3906,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWebCiteURL( $url, $force ) {
@@ -3340,7 +3971,19 @@ class API {
 		} else return $returnArray;
 
 		if( IAVERBOSE ) echo "Making query: $query\n";
-		$data = self::makeHTTPRequest( $query, [], false, false );
+		$metricsArray = [
+			'name'               => WIKIFARM,
+			'group_fields'       => [
+				'ep'   => 'webcitation',
+				'ract' => 'resolve_archive',
+				'sact' => '',
+				'cm'   => "APII::resolveWebCiteURL()"
+			],
+			'aggregation_fields' => [
+
+			]
+		];
+		$data = self::makeHTTPRequest( $query, [], false, false, [], [], $metricsArray );
 		$data = preg_replace( '/\<br\s\/\>\n\<b\>.*? on line \<b\>\d*\<\/b\>\<br\s\/\>/i', "", $data );
 		$data = trim( $data );
 		$xml_parser = xml_parser_create();
@@ -3435,7 +4078,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveYorkUURL( $url ) {
@@ -3461,7 +4104,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveArchiveItURL( $url ) {
@@ -3488,7 +4131,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveArquivoURL( $url ) {
@@ -3516,7 +4159,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveLocURL( $url ) {
@@ -3542,7 +4185,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWebharvestURL( $url ) {
@@ -3568,7 +4211,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveBibalexURL( $url ) {
@@ -3596,7 +4239,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveCollectionsCanadaURL( $url ) {
@@ -3630,7 +4273,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveVeebiarhiivURL( $url ) {
@@ -3656,7 +4299,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveVefsafnURL( $url ) {
@@ -3682,7 +4325,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveProniURL( $url ) {
@@ -3712,7 +4355,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveSpletniURL( $url ) {
@@ -3738,7 +4381,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveStanfordURL( $url ) {
@@ -3764,7 +4407,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveNationalArchivesURL( $url ) {
@@ -3791,7 +4434,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveParliamentUKURL( $url ) {
@@ -3817,7 +4460,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWASURL( $url ) {
@@ -3845,7 +4488,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolvePermaCCURL( $url, $force ) {
@@ -3861,7 +4504,19 @@ class API {
 				}
 				$queryURL = "https://api.perma.cc/v1/public/archives/" . $match[1] . "/";
 				if( IAVERBOSE ) echo "Making query: $queryURL\n";
-				$data = self::makeHTTPRequest( $queryURL, [], false, false );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'permacc',
+						'ract' => 'resolve_archive',
+						'sact' => '',
+						'cm'   => "APII::resolvePermaCCURL()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$data = self::makeHTTPRequest( $queryURL, [], false, false, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 				if( is_null( $data ) ) return $returnArray;
 				if( ( $returnArray['archive_time'] =
@@ -3901,7 +4556,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveLACURL( $url ) {
@@ -3927,7 +4582,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveGoogleURL( $url ) {
@@ -3959,7 +4614,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveNLAURL( $url ) {
@@ -3969,7 +4624,7 @@ class API {
 		                $match
 		) ) {
 			$returnArray['archive_url'] =
-				"http://" . $match[1] . "nla.gov.au/" . $match[2] . ( isset( $match[3] ) ? $match[3] : "" ) .
+				"https://" . $match[1] . "nla.gov.au/" . $match[2] . ( isset( $match[3] ) ? $match[3] : "" ) .
 				$match[4] . "/" . $match[5];
 			//Hack.  Strtotime fails with certain date stamps
 			$match[4] = preg_replace( '/jan(uary)?/i', "01", $match[4] );
@@ -4004,7 +4659,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWikiwixURL( $url, $force ) {
@@ -4028,7 +4683,19 @@ class API {
 			$returnArray['archive_url'] =
 				"http://archive.wikiwix.com/cache/?url=" . urldecode( $match[1] ) . "&apiresponse=1";
 			if( IAVERBOSE ) echo "Making query: {$returnArray['archive_url']}\n";
-			$data = self::makeHTTPRequest( $returnArray['archive_url'], [], false, false );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'wikiwix',
+					'ract' => 'resolve_archive',
+					'sact' => '',
+					'cm'   => "APII::resolveWikiwixURL()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( $returnArray['archive_url'], [], false, false, [], [], $metricsArray, 10 );
 			if( $data == "can't connect db" ) return [];
 			$data = json_decode( $data, true );
 
@@ -4057,7 +4724,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveFreezepageURL( $url, $force = false ) {
@@ -4072,7 +4739,19 @@ class API {
 		//Try and decode the information from the URL first
 		if( preg_match( '/(?:www\.)?freezepage.com\/\S*/i', $url, $match ) ) {
 			if( IAVERBOSE ) echo "Making query: $url\n";
-			$data = self::makeHTTPRequest( $url, [], false, false );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'freezepage',
+					'ract' => 'resolve_archive',
+					'sact' => '',
+					'cm'   => "APII::resolveFreezepageURL()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( $url, [], false, false, [], [], $metricsArray );
 
 			if( preg_match( '/\<a.*?\>((?:ftp|http).*?)\<\/a\> as of (.*?) \<a/i', $data, $match ) ) {
 				$returnArray['archive_url'] = $url;
@@ -4097,7 +4776,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWebRecorderURL( $url ) {
@@ -4125,7 +4804,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWebarchiveUKURL( $url ) {
@@ -4153,7 +4832,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveGhostArchive( $url, $force = false ) {
@@ -4171,7 +4850,19 @@ class API {
 			if( !$force && ( $cachedURL = DB::accessArchiveCache( $url ) ) !== false ) return $cachedURL;
 			$timestampRegex = '/<(?:span|i)>(?:Archived on|Archive date): (.*?)<\/(?:span|i)>/i';
 			$urlRegex = '/name="term" .*? value="(.*?)"(?: type="text"|>)/i';
-			$source = self::makeHTTPRequest( $url );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'ghostarchive',
+					'ract' => 'resolve_archive',
+					'sact' => '',
+					'cm'   => "APII::resolveGhostArchive()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$source = self::makeHTTPRequest( $url, [], false, false, [], [], $metricsArray );
 			if( preg_match( $timestampRegex, $source, $timestamp ) && preg_match( $urlRegex, $source, $newUrl ) ) {
 				$timestamp = strtotime( $timestamp[1] );
 				$newUrl = $newUrl[1];
@@ -4197,7 +4888,7 @@ class API {
 	 *
 	 * @return array Details about the archive.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public static function resolveWaybackURL( $url ) {
@@ -4243,7 +4934,7 @@ class API {
 	 * @access    public
 	 * @return array A list of timestamps of when the resective URLs were added.  Array keys are preserved.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getTimesAdded( $urls ) {
@@ -4257,7 +4948,7 @@ class API {
 			    MYSQLI_CLIENT_SSL : 0 )
 		    )
 		) {
-			$query = "SELECT * FROM " . REVISIONTABLE . " JOIN " . TEXTTABLE . " ON " . REVISIONTABLE . ".rev_id = "
+			$query = "SELECT * FROM " . DB . "." . REVISIONTABLE . " JOIN " . TEXTTABLE . " ON " . REVISIONTABLE . ".rev_id = "
 			         . TEXTTABLE . ".old_id WHERE " . REVISIONTABLE . ".rev_page = " . $this->pageid .
 			         " ORDER BY rev_id ASC;";
 
@@ -4302,7 +4993,7 @@ class API {
 				echo "ERROR: Not all URLs were found in the revision history with the DB.  Re-attempting with API.\n";
 			}
 		} elseif( USEWIKIDB !== false ) {
-			@mysqli_close( $db );
+			if( isset( $db ) && $db instanceof mysqli ) mysqli_close( $db );
 			unset( $db );
 			echo "ERROR: Wiki database usage failed.  Defaulting to API Binary search...\n";
 		}
@@ -4349,7 +5040,19 @@ class API {
 				if( IAVERBOSE ) echo "Making query $get\n";
 
 				//Fetch revisions of needle location in page history.  Scan for the presence of URL.
-				$data = self::makeHTTPRequest( API, $params );
+				$metricsArray = [
+					'name'               => WIKIFARM,
+					'group_fields'       => [
+						'ep'   => 'mediawiki_api',
+						'ract' => 'query',
+						'sact' => 'revisions',
+						'cm'   => "APII::getTimesAdded()"
+					],
+					'aggregation_fields' => [
+
+					]
+				];
+				$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 				$data = json_decode( $data, true );
 
 				//The scan of each URL happens here
@@ -4430,7 +5133,19 @@ class API {
 			];
 			$get = http_build_query( $params );
 			if( IAVERBOSE ) echo "Making query $get\n";
-			$data = self::makeHTTPRequest( API, $params );
+			$metricsArray = [
+				'name'               => WIKIFARM,
+				'group_fields'       => [
+					'ep'   => 'mediawiki_api',
+					'ract' => 'query',
+					'sact' => 'revisions',
+					'cm'   => "APII::getTimesAdded()"
+				],
+				'aggregation_fields' => [
+
+				]
+			];
+			$data = self::makeHTTPRequest( API, $params, false, true, [], [], $metricsArray );
 			$data = json_decode( $data, true );
 			//Another error check
 			if( isset( $data['query']['pages'] ) ) {
@@ -4471,7 +5186,7 @@ class API {
 	 * @access    public
 	 * @return bool True on success, false on failure, null if disabled
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function logCentralAPI( $magicwords ) {
@@ -4503,7 +5218,7 @@ class API {
 	 * @access    public
 	 * @return string Completed string
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getConfigText( $value, $magicwords = [] ) {
@@ -4596,18 +5311,22 @@ class API {
 		return replaceMagicInitWords( $string );
 	}
 
+	public static function flushMetrics() {
+		self::$metricsHandler->flushEntries();
+	}
+
 	/**
 	 * Close the resource handles
 	 *
 	 * @access    public
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function closeResources() {
 		$this->db->closeResource();
-		curl_close( self::$globalCurl_handle );
+		if( is_resource( self::$globalCurl_handle ) ) curl_close( self::$globalCurl_handle );
 		self::$globalCurl_handle = null;
 		$this->db = null;
 	}

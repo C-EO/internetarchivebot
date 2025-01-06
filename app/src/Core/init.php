@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -23,13 +23,13 @@
  * Initializes the bot and the web interface.
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 
 use function Sentry\init;
 
-if( PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION < 7.3 ) {
-	echo "ERROR: Minimum requirements for correct operation is PHP 7.3.  You are running " . PHP_VERSION .
+if( PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION < 7.4 ) {
+	echo "ERROR: Minimum requirements for correct operation is PHP 7.4.  You are running " . PHP_VERSION .
 	     ", which will not run correctly.\n";
 	exit( 1 );
 }
@@ -37,11 +37,11 @@ if( PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION < 7.3 ) {
 //Establish root path
 @define( 'IABOTROOT', dirname( __FILE__, 2 ) . DIRECTORY_SEPARATOR );
 date_default_timezone_set( "UTC" );
-ini_set( 'memory_limit', '256M' );
+ini_set( 'memory_limit', '512M' );
 
 //Extend execution to 5 minutes
 //ini_set( 'max_execution_time', 300 );
-@define( 'VERSION', "2.0.9.3" );
+@define( 'VERSION', "2.0.9.5" );
 
 require_once( IABOTROOT . 'deadlink.config.inc.php' );
 
@@ -61,6 +61,8 @@ $callingFile = $callingFile[count( $callingFile ) - 1];
 @define( 'USER', $user );
 @define( 'PASS', $pass );
 @define( 'DB', $db );
+if( !empty( $secondaryDB ) ) @define( 'SECONDARYDB', $secondaryDB );
+else @define( 'SECONDARYDB', $db );
 @define( 'IABOTDBSSL', $ssl );
 
 @define( 'TESTMODE', $testMode );
@@ -78,10 +80,10 @@ if( !defined( 'IGNOREVERSIONCHECK' ) ) {
 	$versionSupport['backwardsCompatibilityVersions'] =
 		[
 			'2.0.8', '2.0.8.1', '2.0.8.2', '2.0.8.3', '2.0.8.4', '2.0.8.5', '2.0.8.6', '2.0.8.7', '2.0.8.8', '2.0.8.9',
-			'2.0.9', '2.0.9.1', '2.0.9.2'
+			'2.0.9', '2.0.9.1', '2.0.9.2', '2.0.9.3', '2.0.9.4'
 		];
 
-	$rollbackVersions = [ '2.0.8.7', '2.0.8.8', '2.0.8.9', '2.0.9', '2.0.9.1', '2.0.9.2' ];
+	$rollbackVersions = [ '2.0.8.7', '2.0.8.8', '2.0.8.9', '2.0.9', '2.0.9.1', '2.0.9.2', '2.0.9.3', '2.0.9.4' ];
 
 	if( empty( $versionSupport['currentVersion'] ) ) {
 		DB::setConfiguration( 'global', 'versionData', 'currentVersion', VERSION );
@@ -133,7 +135,7 @@ unset( $disableEdits, $userAgent, $apiURL, $oauthURL, $taskname, $nobots, $enabl
 
 foreach( $typeCast as $variable => $type ) {
 	if( !isset( $configuration[$variable] ) ) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: setup.php", true, 307 );
 		echo "The bot has not been set up yet.  Please use the web interface to set up the bot.";
 		exit( 1 );
@@ -149,7 +151,7 @@ require_once( IABOTROOT . "Core/localization.php" );
 $accessibleWikis = DB::getConfiguration( "global", "systemglobals-allwikis" );
 
 if( empty( $accessibleWikis ) ) {
-	@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+	@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 	@header( "Location: setup.php", true, 307 );
 	echo "No wiki has been setup yet.  Please use the web interface to set up the bot.";
 	exit( 1 );
@@ -179,7 +181,7 @@ if( empty( $accessibleWikis[WIKIPEDIA]['i18nsource'] ) || empty( $accessibleWiki
     empty( $accessibleWikis[WIKIPEDIA]['oauthurl'] ) || empty( $accessibleWikis[WIKIPEDIA]['nobots'] ) ||
     !isset( $accessibleWikis[WIKIPEDIA]['apiCall'] ) ) {
 	if( !isset( $accessibleWikis[WIKIPEDIA] ) && WIKIPEDIA != $defaultWiki ) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?wiki=$defaultWiki&missingwikierror=1", true, 307 );
 	}
 
@@ -230,7 +232,7 @@ if( !( defined( 'USEWEBINTERFACE' ) && USEWEBINTERFACE == 1 ) ) {
 
 if( !isset( $accessibleWikis[WIKIPEDIA] ) ) {
 	if( $callingFile == "index.php" && ( !isset( $_GET['systempage'] ) || $_GET['systempage'] != "setup2" ) ) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?page=systemconfig&systempage=setup2&wikiName=" . WIKIPEDIA . "&wiki=$defaultWiki",
 		         true, 307
 		);
@@ -240,7 +242,38 @@ if( !isset( $accessibleWikis[WIKIPEDIA] ) ) {
 }
 $language = $accessibleWikis[WIKIPEDIA]['language'];
 
+define( 'WIKIFARM', $useKeys );
+
+require_once( IABOTROOT . '../../vendor/autoload.php' );
 require_once( IABOTROOT . 'Core/APII.php' );
+
+if( !defined( 'UNIQUEID' ) ) @define( 'UNIQUEID', "" );
+
+require_once( IABOTROOT . 'Core/Metrics/MetricsDriver.php' );
+require_once( IABOTROOT . 'Core/Email/EmailDriver.php' );
+require_once( IABOTROOT . 'Core/Dummy.php' );
+
+foreach( glob( IABOTROOT . 'Core/Metrics/*.php' ) as $file ) {
+	require_once $file;
+}
+
+foreach( glob( IABOTROOT . 'Core/Email/*.php' ) as $file ) {
+	require_once $file;
+}
+
+if( !empty( $MetricsOptions['driver'] ) &&
+    in_array( 'MetricsDriver', class_implements( $MetricsOptions['driver'] ) ) ) {
+	define( 'METRICSDRIVER', $MetricsOptions['driver'] );
+} else define( 'METRICSDRIVER', 'Dummy' );
+if( !empty( $MetricsOptions['configuration'] ) ) define( 'METRICSCONFIG', serialize( $MetricsOptions['configuration'] )
+);
+
+if( !empty( $EmailOptions['driver'] ) &&
+    in_array( 'EmailDriver', class_implements( $EmailOptions['driver'] ) ) ) {
+	define( 'EMAILDRIVER', $EmailOptions['driver'] );
+} else define( 'EMAILDRIVER', 'Dummy' );
+if( isset( $EmailOptions['configuration'] ) ) define( 'EMAILCONFIG', serialize( $EmailOptions['configuration'] )
+);
 
 //Check if the wiki is closed
 if( API::isWikiClosed( WIKIPEDIA ) ) {
@@ -250,12 +283,12 @@ if( API::isWikiClosed( WIKIPEDIA ) ) {
 
 if( isset( $accessibleWikis[WIKIPEDIA]['disabled'] ) ) {
 	if( isset( $_SESSION['previouswiki'] ) ) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?wiki={$_SESSION['previouswiki']}&missingwikierror=1",
 		         true, 307
 		);
 	} else {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?wiki=$defaultWiki&missingwikierror=1",
 		         true, 307
 		);
@@ -282,7 +315,7 @@ if( empty( $archiveTemplates ) ) {
 	@define( 'GUIREDIRECTED', true );
 	if( in_array( $callingFile, [ 'index.php', 'deadlink.php' ] ) &&
 	    ( !isset( $_GET['systempage'] ) || $_GET['systempage'] != "definearchives" ) ) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?page=systemconfig&systempage=definearchives", true, 307 );
 		echo WIKIPEDIA . " is not set up yet.";
 		exit( 1 );
@@ -292,110 +325,17 @@ if( empty( $archiveTemplates ) ) {
 	if( in_array( $callingFile, [ 'index.php', 'deadlink.php' ] ) && ( !isset( $_GET['systempage'] ) ||
 	                                                                   $_GET['systempage'] != "wikiconfig" )
 	) {
-		@header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+		@header( "HTTP/2 307 Temporary Redirect", true, 307 );
 		@header( "Location: index.php?page=systemconfig&systempage=wikiconfig&wiki=" . WIKIPEDIA, true, 307 );
 		echo WIKIPEDIA . " is not set up yet.";
 		exit( 1 );
 	}
 }
 
-require_once( IABOTROOT . '../../vendor/autoload.php' );
 if( isset( $accessibleWikis[WIKIPEDIA] ) && file_exists( IABOTROOT . 'extensions/' . WIKIPEDIA . '.php' ) ) {
 	require_once( IABOTROOT . 'extensions/' . WIKIPEDIA . '.php' );
 }
 
-$offloadableTables = [
-	'externallinks_botqueue'      => [
-		'limit'            => [
-			'< (SELECT MAX(queue_id) - __VALUE__ FROM externallinks_botqueue)',
-			'queue_id'
-		],
-		'queue_timestamp'  => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'status_timestamp' => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'queue_status'     => '\'__VALUE__\'',
-		'__RESTRICTIONS__' => [
-			'queue_status' => '> 1',
-			'fast_offload' => false
-		]
-	],
-	'externallinks_botqueuepages' => [
-		'limit'               => [
-			'< (SELECT MAX(entry_id) - __VALUE__ FROM externallinks_botqueuepages)',
-			'entry_id'
-		],
-		'use_bot_queue_limit' => '< (SELECT MIN(queue_id) FROM externallinks_botqueue)',
-		'__RESTRICTIONS__'    => [
-			'status'       => 'IN (\'complete\', \'skipped\')',
-			'fast_offload' => false
-		]
-	],
-	'externallinks_editfaillog'   => [
-		'limit'            => [
-			'< (SELECT MAX(log_id) - __VALUE__ FROM externallinks_editfaillog)',
-			'log_id'
-		],
-		'timestamp'        => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'__RESTRICTIONS__' => [
-			'fast_offload' => true
-		]
-	],
-	'externallinks_fpreports'     => [
-		'limit'            => [
-			'< (SELECT MAX(report_id) - __VALUE__ FROM externallinks_fpreports)',
-			'report_id'
-		],
-		'report_timestamp' => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'status_timestamp' => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'report_status'    => '__VALUE__',
-		'__RESTRICTIONS__' => [
-			'report_status' => '= 1',
-			'fast_offload'  => false
-		]
-	],
-	'externallinks_log'           => [
-		'limit'            => [
-			'< (SELECT MAX(log_id) - __VALUE__ FROM externallinks_log)',
-			'log_id'
-		],
-		'run_start'        => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'run_end'          => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'__RESTRICTIONS__' => [
-			'fast_offload' => true
-		]
-	],
-	'externallinks_profiledata'   => [
-		'limit'            => [
-			'< (SELECT MAX(run_id) - __VALUE__ FROM externallinks_profiledata)',
-			'run_id'
-		],
-		'timestamp'        => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'__RESTRICTIONS__' => [
-			'fast_offload' => true
-		]
-	],
-	'externallinks_scan_log'      => [
-		'limit'            => [
-			'< (SELECT MAX(scan_id) - __VALUE__ FROM externallinks_scan_log)',
-			'scan_id'
-		],
-		'scan_time'        => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'__RESTRICTIONS__' => [
-			'fast_offload' => true
-		]
-	],
-	'externallinks_userlog'       => [
-		'limit'            => [
-			'< (SELECT MAX(log_id) - __VALUE__ FROM externallinks_userlog)',
-			'log_id'
-		],
-		'log_timestamp'    => '< \'(__TIMESTAMP__ - __VALUE__)\'',
-		'__RESTRICTIONS__' => [
-			'fast_offload' => true
-		]
-	]
-];
-
-@define( 'IABOTOFFLOADABLETABLES', serialize( $offloadableTables ) );
 @define( 'IABOTOFFLOADEDTABLES', serialize( $offloadDBs ) );
 
 if( class_exists( WIKIPEDIA . 'Parser' ) ) {
@@ -464,7 +404,6 @@ if( USEWIKIDB !== false ) {
 if( $availabilityThrottle === 0 ) {
 	@define( 'THROTTLECDXREQUESTS', false );
 } else @define( 'THROTTLECDXREQUESTS', $availabilityThrottle );
-if( !defined( 'UNIQUEID' ) ) @define( 'UNIQUEID', "" );
 unset( $autoFPReport, $wikirunpageURL, $enableAPILogging, $apiCall, $expectedValue, $decodeFunction, $enableMail,
 	$to, $from, $oauthURL, $accessSecret, $accessToken, $consumerSecret, $consumerKey, $db, $user, $pass, $port,
 	$host, $texttable, $pagetable, $revisiontable, $wikidb, $wikiuser, $wikipass, $wikiport, $wikihost, $useWikiDB, $limitedRun, $testMode, $disableEdits, $debug, $runpage, $memoryFile, $taskname, $username, $nobots, $apiURL, $userAgent, $useCIDservers, $cidServers, $cidAuthCode, $rateLimited
@@ -479,7 +418,7 @@ if( !empty( $sentryDSN ) ) {
 }
 
 register_shutdown_function( [ 'Memory', 'destroyStore' ] );
-register_shutdown_function( [ 'DB', 'unsetWatchDog' ] );
+register_shutdown_function( [ 'API', 'flushMetrics'] );
 
 if( !function_exists( 'strptime' ) ) {
 	function strptime( $date, $format ) {
@@ -648,7 +587,7 @@ function replaceMagicInitWords( $input ) {
 		global $taskname;
 	} else $taskname = TASKNAME;
 	if( defined( 'WIKIPEDIA' ) ) $output = str_replace( "{wikipedia}", WIKIPEDIA, $output );
-	$output = str_replace( "{taskname}", $taskname, $output );
+	if( !is_null( $taskname ) ) $output = str_replace( "{taskname}", $taskname, $output );
 
 	return $output;
 }

@@ -1,7 +1,7 @@
 <?php
 
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -24,7 +24,7 @@
  * Parser object
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 
 /**
@@ -33,7 +33,7 @@
  * @abstract
  * @author    Maximilian Doerr (Cyberpower678)
  * @license   https://www.gnu.org/licenses/agpl-3.0.txt
- * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+ * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
  */
 
 use Wikimedia\DeadlinkChecker\CheckIfDead;
@@ -114,7 +114,7 @@ class Parser {
 	 * @access    public
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	public function __construct( API $commObject ) {
 		$this->commObject = $commObject;
@@ -141,26 +141,23 @@ class Parser {
 	 * @return array containing analysis statistics of the page
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 *
 	 */
 	public function analyzePage( &$modifiedLinks = [], $webRequest = false, &$editError = false ) {
 		if( DEBUG === false || LIMITEDRUN === true ) {
-			file_put_contents( IAPROGRESS . "runfiles/" . WIKIPEDIA . UNIQUEID, serialize( [
-				                                                                               'title' => $this->commObject->page,
-				                                                                               'id'    => $this->commObject->pageid
-			                                                                               ]
-			                                                                  )
-			);
+			DB::setCheckpoint( [
+				                   'checkpoint' => serialize( [
+					                                              'title' => $this->commObject->page,
+					                                              'id'    => $this->commObject->pageid
+				                                              ]
+				                   )
+			                   ] );
 		}
 		$dumpcount = 0;
 		unset( $tmp );
 		echo "Analyzing {$this->commObject->page} ({$this->commObject->pageid})...\n";
 		global $jobID;
-		if( !empty( $jobID ) ) $watchDog['jobID'] = $jobID;
-		$watchDog['page'] = $this->commObject->page;
-		$watchDog['status'] = 'start';
-		DB::pingWatchDog( $watchDog );
 		//Tare statistics variables
 		$modifiedLinks = [];
 		$archiveProblems = [];
@@ -172,14 +169,11 @@ class Parser {
 		$otheradded = 0;
 		$analyzed = 0;
 		$newlyArchived = [];
-		$timestamp = date( "Y-m-d\TH:i:s\Z" );
 		$history = [];
 		$toCheck = [];
 		$toCheckMeta = [];
 		if( AUTOFPREPORT === true ) {
 			echo "Fetching previous bot revisions...\n";
-			$watchDog['status'] = 'previousbotrevs';
-			DB::pingWatchDog( $watchDog );
 			$lastRevIDs = $this->commObject->getBotRevisions();
 			$lastRevTexts = [];
 			$lastRevLinks = [];
@@ -201,8 +195,6 @@ class Parser {
 			$referencesOnly = true;
 		}
 
-		$watchDog['status'] = 'fetchlinks';
-		DB::pingWatchDog( $watchDog );
 		$links = $this->getExternalLinks( $referencesOnly, false, $webRequest );
 		if( $links === false && $webRequest === true ) return false;
 		if( isset( $lastRevTexts ) ) {
@@ -217,8 +209,6 @@ class Parser {
 		$newtext = $this->commObject->content;
 
 		//Process the links
-		$watchDog['status'] = 'processpage';
-		DB::pingWatchDog( $watchDog );
 		$checkResponse = $archiveResponse = $fetchResponse = $toArchive = $toFetch = [];
 		//Perform a 3 phase process.
 		//Phases 1 and 2 collect archive information based on the configuration settings on wiki, needed for further analysis.
@@ -326,7 +316,7 @@ class Parser {
 					) {
 						//Populate URLs to submit for archiving.
 						if( $i == 1 ) {
-							$toArchive["$tid:$id"] = $link['url'];
+							if( !isset( $link['malformed_url'] ) ) $toArchive["$tid:$id"] = $link['url'];
 						} else {
 							//If it archived, then tally the success, otherwise, note it.
 							if( $archiveResponse["$tid:$id"] === true ) {
@@ -341,7 +331,7 @@ class Parser {
 					) {
 						//Populate URLs to submit for archiving.
 						if( $i == 1 ) {
-							$toArchive[$tid] = $link['url'];
+							if( !isset( $link['malformed_url'] ) ) $toArchive[$tid] = $link['url'];
 						} else {
 							//If it archived, then tally the success, otherwise, note it.
 							if( $archiveResponse[$tid] === true ) {
@@ -594,7 +584,7 @@ class Parser {
 				$escapedURLs[] = $this->dbObject->sanitize( $url );
 			}
 			$sql =
-				"SELECT * FROM externallinks_fpreports LEFT JOIN externallinks_global ON externallinks_fpreports.report_url_id = externallinks_global.url_id WHERE `url` IN ( '" .
+				"SELECT * FROM " . SECONDARYDB . ".externallinks_fpreports LEFT JOIN " . DB . ".externallinks_global ON " . SECONDARYDB . ".externallinks_fpreports.report_url_id = " . DB . ".externallinks_global.url_id WHERE `url` IN ( '" .
 				implode( "', '", $escapedURLs ) . "' ) AND `report_status` = 0;";
 			$res = $this->dbObject->queryDB( $sql );
 			$alreadyReported = [];
@@ -677,7 +667,7 @@ class Parser {
 				}
 			}
 			if( !empty( $escapedURLs ) ) {
-				$sql = "UPDATE externallinks_global SET `live_state` = 3 WHERE `paywall_id` IN ( " .
+				$sql = "UPDATE " . DB . ".externallinks_global SET `live_state` = 3 WHERE `paywall_id` IN ( " .
 				       implode( ", ", $escapedURLs ) . " );";
 				if( $this->dbObject->queryDB( $sql ) ) {
 					foreach( $escapedURLs as $id => $paywallID ) {
@@ -706,7 +696,7 @@ class Parser {
 				}
 			}
 			if( !empty( $escapedURLs ) ) {
-				$sql = "UPDATE externallinks_paywall SET `paywall_status` = 3 WHERE `paywall_id` IN ( " .
+				$sql = "UPDATE " . DB . ".externallinks_paywall SET `paywall_status` = 3 WHERE `paywall_id` IN ( " .
 				       implode( ", ", $escapedURLs ) . " );";
 				if( $this->dbObject->queryDB( $sql ) ) {
 					foreach( $escapedURLs as $id => $paywallID ) {
@@ -720,7 +710,7 @@ class Parser {
 			}
 			if( !empty( $toReport ) ) {
 				$sql =
-					"SELECT * FROM externallinks_user LEFT JOIN externallinks_userpreferences ON externallinks_userpreferences.user_link_id= externallinks_user.user_link_id WHERE `user_email_confirmed` = 1 AND `user_email_fpreport` = 1 AND `wiki` = '" .
+					"SELECT * FROM " . SECONDARYDB . ".externallinks_user LEFT JOIN " . SECONDARYDB . ".externallinks_userpreferences ON " . SECONDARYDB . ".externallinks_userpreferences.user_link_id= " . SECONDARYDB . ".externallinks_user.user_link_id WHERE `user_email_confirmed` = 1 AND `user_email_fpreport` = 1 AND `wiki` = '" .
 					WIKIPEDIA . "';";
 				$res = $this->dbObject->queryDB( $sql );
 				while( $result = $res->fetch_assoc() ) {
@@ -746,8 +736,6 @@ class Parser {
 			}
 		}
 
-		$watchDog['status'] = 'makingedits';
-		DB::pingWatchDog( $watchDog );
 		$archiveResponse = $checkResponse = $fetchResponse = null;
 		unset( $archiveResponse, $checkResponse, $fetchResponse );
 		echo "Rescued: $rescued; Tagged dead: $tagged; Archived: $archived; Memory Used: " .
@@ -846,9 +834,22 @@ class Parser {
 			    $pageModified ) {
 				$revid =
 					API::edit( $this->commObject->page, $newtext,
-					           $this->commObject->getConfigText( "maineditsummary", $magicwords ), false, $timestamp,
+					           $this->commObject->getConfigText( "maineditsummary", $magicwords ), false,
+					           date( "Y-m-d\TH:i:s\Z", $this->commObject->contentFetchTime ),
 					           true, false, "", $editError
 					);
+				if( strpos( $editError, "editconflict" ) !== false ) {
+					$tmp = APIICLASS;
+					$commObject =
+						new $tmp( $this->commObject->page, $this->commObject->pageid, $this->commObject->config );
+					$tmp = PARSERCLASS;
+					$parser = new $tmp( $commObject );
+					$stats = $parser->analyzePage();
+					$commObject->closeResources();
+					$parser = $commObject = null;
+
+					return $stats;
+				}
 			} else $magicwords['logstatus'] = "posted";
 			if( isset( $revid ) ) {
 				$magicwords['diff'] = str_replace( "api.php", "index.php", API ) . "?diff=prev&oldid=$revid";
@@ -982,9 +983,6 @@ class Parser {
 			'othersadded'   => $otheradded, 'revid' => ( isset( $revid ) ? $revid : false )
 		];
 
-		$watchDog['status'] = 'done';
-		DB::pingWatchDog( $watchDog );
-
 		return $returnArray;
 	}
 
@@ -997,7 +995,7 @@ class Parser {
 	 * @access    public
 	 * @return array Details about every link on the page
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getExternalLinks( $referenceOnly = false, $text = false, $webRequest = false ) {
@@ -1196,7 +1194,7 @@ class Parser {
 	 * @access    public
 	 * @return array All parsed links
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function parseLinks( $referenceOnly = false, $text = false, $webRequest = false ) {
@@ -1426,8 +1424,6 @@ class Parser {
 
 			$returnArray[] = $subArray;
 		}
-
-		if( $webRequest === true && count( $returnArray ) > 300 ) return false;
 
 		return $returnArray;
 	}
@@ -2026,9 +2022,13 @@ class Parser {
 								$lastEnd = $tOffset2 = strpos( $pageText, $bracketItem[1], $tOffset );
 							} else {
 								if( !$moveStart ) {
-									$tOffset2 = @strpos( $pageText, $bracketItem[1],
-									                     max( $tOffset, $tOffset2 ) + strlen( $bracketItem[1] )
-									);
+									try {
+										$tOffset2 = @strpos( $pageText, $bracketItem[1],
+										                     max( $tOffset, $tOffset2 ) + strlen( $bracketItem[1] )
+										);
+									} catch (ValueError $e) {
+										$tOffset2 = false;
+									}
 								}
 								if( !isset( $lastEnd ) ) $lastEnd = $tOffset2;
 								if( $tOffset2 === false ) {
@@ -2224,7 +2224,7 @@ class Parser {
 	 * @access    public
 	 * @return array    Details about the link
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getLinkDetails( $linkString, $remainder ) {
@@ -2390,6 +2390,10 @@ class Parser {
 			unset( $returnArray['original_url'] );
 		}
 
+		if( empty( strtolower( parse_url( $this->deadCheck->sanitizeURL( $returnArray['url'] ), PHP_URL_SCHEME ) ) ) ) {
+			$returnArray['malformed_url'] = true;
+		}
+
 		if( isset( $returnArray['archive_template'] ) ) {
 			if( isset( $returnArray['archive_template']['parameters']['__FORMAT__'] ) ) {
 				$returnArray['archive_template']['format'] =
@@ -2420,7 +2424,7 @@ class Parser {
 	 * @access    protected
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	protected function filterText( $text, $trim = false ) {
 		$text = preg_replace( '/\<\!\-\-(?:.|\n)*?\-\-\>/ui', "", $text );
@@ -2471,7 +2475,7 @@ class Parser {
 	 * @access    protected
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function analyzeBareURL( &$returnArray, &$params ) {
@@ -2547,7 +2551,7 @@ class Parser {
 	 * @access    public
 	 * @return array Template parameters with respective values
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function getTemplateParameters( $templateString ) {
@@ -2672,7 +2676,7 @@ class Parser {
 	 * @access    protected
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function analyzeCitation( &$returnArray, &$params ) {
@@ -2949,11 +2953,13 @@ class Parser {
 	 * @access    protected
 	 * @return string The language code of the template.
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function analyzeRemainder( &$returnArray, &$remainder ) {
-		if( @strpos( $returnArray['link_string'], $remainder ) !== false ) $returnArray['remainder_inline'] = true;
+		try {
+			if( @strpos( $returnArray['link_string'], $remainder ) !== false ) $returnArray['remainder_inline'] = true;
+		} catch( ValueError $e ) {}
 
 		//If there's an archive tag, then...
 		if( large_preg_match( DataGenerator::fetchTemplateRegex( $this->commObject->config['archive_tags'] ),
@@ -3371,7 +3377,7 @@ class Parser {
 	 * @access    public
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 */
 	public function isConnected( $lastLink, $currentLink, &$returnArray ) {
 		//If one is in a reference and the other is not, there can't be a connection.
@@ -3567,7 +3573,7 @@ class Parser {
 	 * @access    public
 	 * @return array Returns the same array with the access_time parameters updated
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function updateAccessTimes( $links, $skipSearch = false ) {
@@ -3613,7 +3619,7 @@ class Parser {
 	 * @access    public
 	 * @return array Returns the same array with updated values, if any
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function updateLinkInfo( $links ) {
@@ -3768,7 +3774,7 @@ class Parser {
 	 * @access    protected
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function rescueLink( &$link, &$modifiedLinks, &$temp, $tid, $id ) {
@@ -3891,7 +3897,7 @@ class Parser {
 	 * @abstract
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function noRescueLink( &$link, &$modifiedLinks, $tid, $id ) {
@@ -4019,7 +4025,7 @@ class Parser {
 	 * @return array Details about every link on the page
 	 * @return bool|int If the edit was likely the bot being reverted, it will return the first bot revid it occurred
 	 *     on.
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -4106,7 +4112,7 @@ class Parser {
 	 * @access    public
 	 * @return array Details about every link on the page
 	 * @return bool If the link is likely a false positive
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
 	 */
@@ -4127,7 +4133,7 @@ class Parser {
 			}
 
 			$sql =
-				"SELECT * FROM externallinks_fpreports WHERE `report_status` = 2 AND `report_url_id` = {$this->commObject->db->dbValues[$id]['url_id']};";
+				"SELECT * FROM " . SECONDARYDB . ".externallinks_fpreports WHERE `report_status` = 2 AND `report_url_id` = {$this->commObject->db->dbValues[$id]['url_id']};";
 			if( $res = $this->dbObject->queryDB( $sql ) ) {
 				if( $res->num_rows() > 0 ) {
 					$res->free();
@@ -4156,7 +4162,7 @@ class Parser {
 	 * @access    public
 	 * @return bool True to skip
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function leaveTalkOnly() {
@@ -4172,7 +4178,7 @@ class Parser {
 	 * @access    protected
 	 * @return bool
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	protected function leaveTalkMessage() {
@@ -4188,7 +4194,7 @@ class Parser {
 	 * @access    public
 	 * @return void
 	 * @license   https://www.gnu.org/licenses/agpl-3.0.txt
-	 * @copyright Copyright (c) 2015-2021, Maximilian Doerr, Internet Archive
+	 * @copyright Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 	 * @author    Maximilian Doerr (Cyberpower678)
 	 */
 	public function __destruct() {

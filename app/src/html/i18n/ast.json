@@ -2,7 +2,8 @@
 	"@metadata": {
 		"authors": [
 			"Fitoschido",
-			"Xuacu"
+			"Xuacu",
+			"YoaR"
 		]
 	},
 	"consolename": "Interfaz d'alministración de IABot",
@@ -18,9 +19,9 @@
 	"manageurlmenutitle": "Alministrar los datos d'URL",
 	"manageurlmenutitlesingle": "Alministrar URL individuales",
 	"manageurlmenutitledomain": "Alministrar dominios enteros",
-	"bugreportmenutitle": "Unviar un informe d'error",
+	"bugreportmenutitle": "Avisar d'un problema",
 	"bugreportmenutitlefalsepositive": "Informar d'un falsu positivu",
-	"bugreportmenutitlerealbug": "Informar d'un fallu",
+	"bugreportmenutitlerealbug": "Avisar d'otros problemes",
 	"metamenutitle": "Meta",
 	"metamenutitlelogs": "Rexistros de la interfaz",
 	"metamenutitleusers": "Usuarios de la interfaz",
@@ -28,6 +29,7 @@
 	"metamenutitlerootheader": "Sólo accesu de root",
 	"metamenutitlefalsepositivereview": "Accesu a los informes de falsos positivos",
 	"metamenutitlebotqueue": "Accesu a la cola del bot",
+	"metamenutitlestats": "Ver estadístiques del bot",
 	"loginbutton": "Aniciar sesión",
 	"logoutbutton": "Salir",
 	"notloggedin": "Nun aniciasti sesión",
@@ -237,7 +239,7 @@
 	"emailplaceholder": "Añade equí el to corréu electrónicu",
 	"invalidemail": "Esta nun ye una direición de corréu electrónicu válida.",
 	"confirmemailwarning1": "Pa poder utilizar esti corréu, necesites confirmalu primero. Pulsia guardar pa siguir.",
-	"confirmemailwarning2": "Esti corréu electrónicu nun ta confirmáu. Busca'l corréu de confirmación y pulsia nel enllaz que contien.",
+	"confirmemailwarning2": "Esti corréu electrónicu nun ta confirmáu. Busca'l corréu de confirmación y pulsia nel enllaz que contién.",
 	"confirmedemail": "Esti corréu electrónicu ta confirmáu y activu.",
 	"user_email_fpreport": "Recibir notificaciones per corréu electrónicu cuando s'informe de nuevos falsos positivos",
 	"user_email_blockstatus": "Recibir notificaciones per corréu electrónicu si te (des)bloquiaron nesta interfaz",
@@ -347,5 +349,6 @@
 	"optional": "Opcional",
 	"accessoverride": "Saltar el bloquéu de la interfaz",
 	"unknownuser": "Usuariu anónimu/desconocíu",
-	"languageunavailableheader": "L'idioma nun ta disponible"
+	"wikiName": "Identificador de wiki",
+	"runpage_status_label": "Nesti wiki el bot ta actualmente"
 }

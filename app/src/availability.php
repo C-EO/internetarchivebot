@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, James Hare, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, James Hare, Internet Archive
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as published by
 	the Free Software Foundation, either version 3 of the License, or
@@ -26,23 +26,25 @@ Memory::clean();
 
 DB::checkDB();
 
-DB::setWatchDog( 'Availability Worker' );
-
 $previousRequests = [];
 $activePayloads = [];
 
 $retryLimit = 50;
 $period = 60;
+$batchLimit = 100;
 
 while( true ) {
-	$microEpoch = (int ) ( ( microtime( true ) - $period ) * 1000000 );
-	while( isset( $previousRequests[$microEpoch] ) ) usleep( 250 );
+	do {
+		$microEpoch = (int ) ( ( microtime( true ) - $period ) * 1000000 );
+	} while( isset( $previousRequests[$microEpoch] ) );
 	$numberLastEdits = count( $previousRequests );
 	if( $numberLastEdits > THROTTLECDXREQUESTS ) {
 		foreach( $previousRequests as $execTime => $junk ) {
 			if( $execTime < $microEpoch ) unset( $previousRequests[$execTime] );
 		}
 
+		echo "Hit rate limit of " . THROTTLECDXREQUESTS . "!  Sleeping for 1 second.\n";
+		sleep( 1 );
 		continue;
 	}
 	if( $numberLastEdits >= THROTTLECDXREQUESTS ) {
@@ -60,10 +62,12 @@ while( true ) {
 
 	$pendingRequests = DB::getPendingAvailabilityRequests();
 
+	if( !isset( $getURLs ) ) $getURLs = [];
 	foreach( $pendingRequests as $pendingRequest ) {
 		$payload = $pendingRequest['payload'];
 		parse_str( $payload, $payloadBreakdown );
 		if( isset( $getURLs[$payloadBreakdown['tag']] ) ) break;
+		if( count( $getURLs ) >= $batchLimit ) break;
 		$getURLs[$payloadBreakdown['tag']] = $pendingRequest['payload'];
 		$activePayloads[$payloadBreakdown['tag']]['count'] = 0;
 		$activePayloads[$payloadBreakdown['tag']]['request_id'] = $pendingRequest['request_id'];
@@ -102,5 +106,4 @@ while( true ) {
 		if( $results['code'] == 429 ) sleep( 5 );
 	}
 
-	DB::pingWatchDog();
 }

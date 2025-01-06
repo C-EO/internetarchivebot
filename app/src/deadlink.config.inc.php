@@ -41,7 +41,18 @@ $port = "";
 $user = "";
 $pass = "";
 $db = "";
+$secondaryDB = "";
 $ssl = false;
+
+// Configure metrics driver to use and pass configuration values to the driver
+$MetricsOptions = [
+	'driver' => 'Dummy',
+	'configuration' => []
+];
+$EmailOptions = [
+	'driver' => 'Dummy',
+	'configuration' => []
+];
 
 //Offload tables that can get large into a secondary DBs
 $offloadDBs = [];

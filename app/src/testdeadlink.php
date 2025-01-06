@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -44,19 +44,23 @@ if( empty( $_POST ) ) {
 	$jsonOut['error'] = "nocommand";
 	$jsonOut['errormessage'] = "You must provide inputs.";
 } else {
-	if( empty( $_POST['authcode'] ) || array_search( $_POST['authcode'], $accessCodes ) ) {
+	if( empty( $_POST['authcode'] ) || array_search( $_POST['authcode'], $accessCodes ) === false ) {
 		dieAuthError();
 	}
 	if( empty( $_POST['urls'] ) ) {
 		$jsonOut['missingvalue'] = "urls";
 		$jsonOut['errormessage'] = "You need to provide URLs to check.";
 	} else {
+		if( isset( $_POST['returncodes'] ) && $_POST['returncodes'] == '1' ) $returnCodes = true;
+		else $returnCodes = false;
 		$urls = explode( "\n", $_POST['urls'] );
 		$results = $checkIfDead->areLinksDead( $urls );
 		$errors = $checkIfDead->getErrors();
+		$details = $checkIfDead->getRequestDetails();
 		$out = [];
 		foreach( $results as $url => $result ) {
-			$out[$url] = $result;
+			if( !$returnCodes ) $out[$url] = $result;
+			else $out[$url] = $details[$url]['http_code'];
 			if( $result === true ) $out['errors'][$url] = $errors[$url];
 		}
 		$jsonOut['results'] = $out;
@@ -96,6 +100,6 @@ function json_prepare_array( $dat ) {
 function dieAuthError() {
 	global $jsonOut, $oauthObject;
 	$jsonOut['noaccess'] = "Missing/invalid authorization";
-	header( "HTTP/1.1 401 Unauthorized", true, 401 );
+	header( "HTTP/2 401 Unauthorized", true, 401 );
 	die( json_encode( $jsonOut ) );
 }

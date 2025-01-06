@@ -1,7 +1,7 @@
 <?php
 
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -30,6 +30,7 @@ if( !empty( $_REQUEST['page'] ) && in_array( $_REQUEST['page'], $forceAuthorizat
 $dbObject = new DB2();
 $oauthObject = new OAuth( false, $dbObject );
 $userObject = new User( $dbObject, $oauthObject );
+new Wikimedia\DeadlinkChecker\CheckIfDead();
 $userCache = [];
 if( $clearChecksum ) invalidateChecksum();
 
@@ -42,8 +43,6 @@ if( !is_null( $userObject->getDefaultWiki() ) && $userObject->getDefaultWiki() !
 define( 'USERLANGUAGE', $userObject->getLanguage() );
 
 use Wikimedia\DeadlinkChecker\CheckIfDead;
-
-$checkIfDead = new CheckIfDead();
 
 //workaround for broken PHPstorm
 //Do some POST cleanup to convert everything to a newline.
@@ -67,7 +66,7 @@ if( empty( $_GET ) && empty( $_POST ) ) {
 if( !defined( 'GUIREDIRECTED' ) ) {
 	if( $userObject->defineGroups() === false ) {
 		if( $loadedArguments['page'] != "systemconfig" || $loadedArguments['systempage'] != "configuregroups" ) {
-			header( "HTTP/1.1 307 Temporary Redirect", true, 307 );
+			header( "HTTP/2 307 Temporary Redirect", true, 307 );
 			header( "Location: index.php?page=systemconfig&systempage=configuregroups", true, 307 );
 			die( "Groups need to be defined first." );
 		}
@@ -75,7 +74,7 @@ if( !defined( 'GUIREDIRECTED' ) ) {
 }
 
 if( isset( $locales[$userObject->getLanguage()] ) ) {
-	if( !in_array( setlocale( LC_ALL, $locales[$userObject->getLanguage()] ), $locales[$userObject->getLanguage()] ) ) {
+	if( !empty( $locales[$userObject->getLanguage()] ) && !in_array( setlocale( LC_ALL, $locales[$userObject->getLanguage()] ), $locales[$userObject->getLanguage()] ) ) {
 		//Uh-oh!! None of the locale definitions are supported on this system.
 		echo "<!-- Missing locale for \"{$userObject->getLanguage()}\" -->\n";
 		if( !method_exists( "IABotLocalization", "localize_" . $userObject->getLanguage() ) ) {
@@ -138,6 +137,12 @@ if( ( file_exists( "gui.maintenance.json" ) || $disableInterface === true ) &&
 
 $mainHTML->loadWikisi18n();
 $mainHTML->loadLanguages();
+
+if( $dbObject->hasOffloadConnectError() ) {
+	$mainHTML->setMessageBox( "warning", "{{{dberror}}}", "{{{non-criticaldbfailure}}}");
+	$mainHTML->assignAfterElement( "errno", $dbObject->hasOffloadConnectError()[0] );
+	$mainHTML->assignAfterElement( "errormessage", $dbObject->hasOffloadConnectError()[1] );
+}
 
 if( isset( $loadedArguments['action'] ) ) {
 	if( $oauthObject->isLoggedOn() === true ) {
@@ -306,7 +311,7 @@ if( isset( $loadedArguments['page'] ) ) {
 
 finishloading:
 $sql =
-	"SELECT COUNT(*) AS count FROM externallinks_user WHERE `last_action` >= '" . date( 'Y-m-d H:i:s', time() - 300 ) .
+	"SELECT COUNT(*) AS count FROM " . SECONDARYDB . ".externallinks_user WHERE `last_action` >= '" . date( 'Y-m-d H:i:s', time() - 300 ) .
 	"' OR `last_login` >= '" . date( 'Y-m-d H:i:s', time() - 300 ) . "';";
 $res = $dbObject->queryDB( $sql );
 if( $result = $res->fetch_assoc() ) {
@@ -349,7 +354,7 @@ $mainHTML->assignAfterElement( "csrftoken", $oauthObject->getCSRFToken() );
 $mainHTML->assignAfterElement( "checksum", $oauthObject->getChecksumToken() );
 if( isset( $loadedArguments['missingwikierror'] ) ) {
 	$mainHTML->loadMissingWikiError( $userObject->getLanguage() );
-	header( "HTTP/1.1 404 Not Found", true, 404 );
+	header( "HTTP/2 404 Not Found", true, 404 );
 }
 if( $userObject->getAnalyticsPermission() ) $mainHTML->assignElement( "analyticshtml",
                                                                       "<script src=\"static/analytics.js\"></script>"

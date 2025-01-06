@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -32,7 +32,7 @@ require_once( $path . 'sessions.config.inc.php' );
 if( $sessionSecure === true && isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) &&
     $_SERVER['HTTP_X_FORWARDED_PROTO'] != "https" ) {
 	$redirect = "https://{$_SERVER['HTTP_HOST']}{$_SERVER['REQUEST_URI']}";
-	header( "HTTP/1.1 101 Switching Protocols", true, 101 );
+	header( "HTTP/2 101 Switching Protocols", true, 101 );
 	header( "Location: $redirect" );
 	exit( 0 );
 }
@@ -92,3 +92,5 @@ require_once( 'Includes/pagefunctions.php' );
 require_once( 'Includes/actionfunctions.php' );
 
 setlocale( LC_ALL, unserialize( BOTLOCALE ) );
+
+define( 'NOCHECKPOINT', 1 );

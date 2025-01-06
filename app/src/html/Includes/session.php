@@ -1,6 +1,6 @@
 <?php
 /*
-	Copyright (c) 2015-2023, Maximilian Doerr, Internet Archive
+	Copyright (c) 2015-2024, Maximilian Doerr, Internet Archive
 
 	This file is part of IABot's Framework.
 
@@ -134,7 +134,7 @@ class Session {
 	}
 
 	protected function createSessionsTable() {
-		if( !mysqli_query( $this->sessionDBObject, "CREATE TABLE IF NOT EXISTS `externallinks_sessions` (
+		if( !mysqli_query( $this->sessionDBObject, "CREATE TABLE IF NOT EXISTS externallinks_sessions (
 								  `id` CHAR(128) NOT NULL,
 								  `set_time` CHAR(10) NOT NULL,
 								  `data` LONGBLOB NOT NULL,
